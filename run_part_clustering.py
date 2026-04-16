@@ -636,7 +636,172 @@ def load_ply_to_numpy(filename):
     
     return points
 
-def solve_clustering(input_fname, uid, view_id, save_dir="test_results1", out_render_fol= "test_render_clustering", use_agglo=False, max_num_clusters=18, is_pc=False, option=1, with_knn=True, export_mesh=True):
+def compute_face_normals(vertices, faces):
+    """
+    Compute unit normals for each face.
+
+    Parameters
+    ----------
+    vertices : np.ndarray of shape (V, 3)
+    faces : np.ndarray of shape (F, 3)
+
+    Returns
+    -------
+    normals : np.ndarray of shape (F, 3), unit normals per face
+    """
+    v0 = vertices[faces[:, 0]]
+    v1 = vertices[faces[:, 1]]
+    v2 = vertices[faces[:, 2]]
+    cross = np.cross(v1 - v0, v2 - v0)
+    norms = np.linalg.norm(cross, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)  # avoid division by zero for degenerate faces
+    return cross / norms
+
+
+def build_face_adjacency_list(faces):
+    """
+    Build a face adjacency list from shared edges.
+
+    Returns
+    -------
+    adj : dict mapping face_idx -> set of adjacent face indices
+    """
+    edge_to_faces = defaultdict(list)
+    for f_idx, (v0, v1, v2) in enumerate(faces):
+        edges = [
+            tuple(sorted((v0, v1))),
+            tuple(sorted((v1, v2))),
+            tuple(sorted((v2, v0))),
+        ]
+        for e in edges:
+            edge_to_faces[e].append(f_idx)
+
+    adj = defaultdict(set)
+    for face_indices in edge_to_faces.values():
+        unique = list(set(face_indices))
+        for i in range(len(unique)):
+            for j in range(i + 1, len(unique)):
+                adj[unique[i]].add(unique[j])
+                adj[unique[j]].add(unique[i])
+    return adj
+
+
+def refine_boundary_labels(vertices, faces, labels, normal_threshold=0.5,
+                           max_iterations=3, ring_size=3):
+    """
+    Refine cluster labels at part boundaries using face-normal consistency
+    over an extended neighborhood (multi-ring).
+
+    For each boundary face, we gather all faces within *ring_size* hops and
+    compute the mean normal of each cluster present in that neighborhood.
+    If the face's normal is significantly more consistent with a neighboring
+    cluster than its own, it is reassigned.
+
+    Using a wider ring (default 3) captures the orientation of the broader
+    surface patch rather than just the 3 immediate neighbors, which makes
+    the check effective even on smooth meshes.
+
+    Parameters
+    ----------
+    vertices : np.ndarray (V, 3)
+    faces : np.ndarray (F, 3)
+    labels : np.ndarray (F,)  — integer cluster label per face
+    normal_threshold : float
+        Minimum cosine-similarity improvement over the current cluster
+        required to reassign. Lower = more aggressive.
+    max_iterations : int
+        Maximum number of refinement passes.
+    ring_size : int
+        Number of adjacency hops to consider when computing cluster normals.
+
+    Returns
+    -------
+    labels : np.ndarray (F,)  — refined labels
+    """
+    labels = labels.copy().astype(int).ravel()
+    face_normals = compute_face_normals(vertices, faces)
+    adj = build_face_adjacency_list(faces)
+    num_faces = len(faces)
+
+    def get_k_ring(fi, k):
+        """Return the set of faces within k adjacency hops of fi (excluding fi)."""
+        visited = {fi}
+        frontier = {fi}
+        for _ in range(k):
+            next_frontier = set()
+            for f in frontier:
+                for nb in adj.get(f, set()):
+                    if nb not in visited:
+                        visited.add(nb)
+                        next_frontier.add(nb)
+            frontier = next_frontier
+        visited.discard(fi)
+        return visited
+
+    for iteration in range(max_iterations):
+        changed = 0
+        new_labels = labels.copy()
+
+        for fi in range(num_faces):
+            immediate_neighbors = adj.get(fi, set())
+            if not immediate_neighbors:
+                continue
+
+            my_label = labels[fi]
+
+            # Quick check: is this face on a boundary?
+            neighbor_labels = {labels[nj] for nj in immediate_neighbors}
+            if len(neighbor_labels) == 1 and my_label in neighbor_labels:
+                continue  # interior face
+
+            # Gather the extended neighborhood
+            ring = get_k_ring(fi, ring_size)
+
+            # Compute mean normal per cluster in the ring
+            cluster_normals = defaultdict(list)
+            for nj in ring:
+                cluster_normals[labels[nj]].append(face_normals[nj])
+
+            my_normal = face_normals[fi]
+
+            # Cosine similarity with own cluster
+            if my_label in cluster_normals and cluster_normals[my_label]:
+                mean_same = np.mean(cluster_normals[my_label], axis=0)
+                mean_same = mean_same / max(np.linalg.norm(mean_same), 1e-12)
+                cos_same = np.dot(my_normal, mean_same)
+            else:
+                cos_same = -1.0
+
+            best_label = my_label
+            best_cos = cos_same
+
+            # Only consider clusters that are directly adjacent (not random
+            # clusters that happen to be in the k-ring)
+            candidate_labels = {labels[nj] for nj in immediate_neighbors} - {my_label}
+            for other_label in candidate_labels:
+                if other_label not in cluster_normals:
+                    continue
+                mean_other = np.mean(cluster_normals[other_label], axis=0)
+                mean_other = mean_other / max(np.linalg.norm(mean_other), 1e-12)
+                cos_other = np.dot(my_normal, mean_other)
+
+                if cos_other > best_cos + normal_threshold:
+                    best_cos = cos_other
+                    best_label = other_label
+
+            if best_label != my_label:
+                new_labels[fi] = best_label
+                changed += 1
+
+        labels = new_labels
+        print(f"  Boundary refinement iteration {iteration + 1}: {changed} faces reassigned")
+        if changed == 0:
+            break
+
+    return labels
+
+
+def solve_clustering(input_fname, uid, view_id, save_dir="test_results1", out_render_fol= "test_render_clustering", use_agglo=False, max_num_clusters=18, is_pc=False, option=1, with_knn=True, export_mesh=True, normal_threshold=0.5, refine_iters=3, ring_size=3):
     print(uid, view_id)
     
     if not is_pc:
@@ -666,15 +831,20 @@ def solve_clustering(input_fname, uid, view_id, save_dir="test_results1", out_re
             clustering = KMeans(n_clusters=num_cluster, random_state=0).fit(point_feat)
             labels = clustering.labels_
 
-            
+            # Refine boundary labels using face normals (mesh only)
+            if not is_pc:
+                labels = refine_boundary_labels(mesh.vertices, mesh.faces, labels,
+                                                normal_threshold=normal_threshold,
+                                                max_iterations=refine_iters,
+                                                ring_size=ring_size)
+
             pred_labels = np.zeros((len(labels), 1))
             for i, label in enumerate(np.unique(labels)):
-                # print(i, label)
-                pred_labels[labels == label] = i  # Assign RGB values to each label
+                pred_labels[labels == label] = i
 
             fname_clustering = os.path.join(out_render_fol, "cluster_out", str(uid) + "_" + str(view_id) + "_" + str(num_cluster).zfill(2))
             np.save(fname_clustering, pred_labels)
-            
+
 
             if not is_pc:
                 V = mesh.vertices
@@ -684,7 +854,7 @@ def solve_clustering(input_fname, uid, view_id, save_dir="test_results1", out_re
                     fname_mesh = os.path.join(out_render_fol, "ply", str(uid) + "_" + str(view_id) + "_" + str(num_cluster).zfill(2) + ".ply")
                     export_colored_mesh_ply(V, F, pred_labels, filename=fname_mesh)
 
-            
+
             else:
                 if export_mesh:
                     fname_pc = os.path.join(out_render_fol, "ply", str(uid) + "_" + str(view_id) + "_" + str(num_cluster).zfill(2) + ".ply")
@@ -719,9 +889,17 @@ def solve_clustering(input_fname, uid, view_id, save_dir="test_results1", out_re
 
         for n_cluster in range(max_num_clusters):
             FL = all_FL[n_cluster]
+
+            # Refine boundary labels using face normals
+            FL = refine_boundary_labels(mesh.vertices, mesh.faces, FL,
+                                        normal_threshold=normal_threshold,
+                                        max_iterations=refine_iters,
+                                        ring_size=ring_size)
+
             relabel = np.zeros((len(FL), 1))
+            unique_labels = np.unique(FL)
             for i, label in enumerate(unique_labels):
-                relabel[FL == label] = i  # Assign RGB values to each label
+                relabel[FL == label] = i
 
             V = mesh.vertices
             F = mesh.faces
@@ -749,6 +927,9 @@ if __name__ == '__main__':
     parser.add_argument('--with_knn', default= False, type=bool)
 
     parser.add_argument('--export_mesh', default= True, type=bool)
+    parser.add_argument('--normal_threshold', default=0.5, type=float, help='Cosine similarity improvement needed to reassign a boundary face (higher = more conservative)')
+    parser.add_argument('--refine_iters', default=3, type=int, help='Max iterations of boundary normal refinement')
+    parser.add_argument('--ring_size', default=3, type=int, help='Number of adjacency hops for computing cluster normals at boundaries')
 
     FLAGS = parser.parse_args()
     root = FLAGS.root
@@ -763,6 +944,9 @@ if __name__ == '__main__':
     WITH_KNN = FLAGS.with_knn
 
     EXPORT_MESH = FLAGS.export_mesh
+    NORMAL_THRESHOLD = FLAGS.normal_threshold
+    REFINE_ITERS = FLAGS.refine_iters
+    RING_SIZE = FLAGS.ring_size
 
     models = os.listdir(root)
     os.makedirs(OUTPUT_FOL, exist_ok=True)
@@ -803,4 +987,4 @@ if __name__ == '__main__':
         uid = model.split(".")[-2]
         view_id = 0
 
-        solve_clustering(fname, uid, view_id, save_dir=root, out_render_fol= OUTPUT_FOL, use_agglo=USE_AGGLO, max_num_clusters=MAX_NUM_CLUSTERS, is_pc=IS_PC, option=OPTION, with_knn=WITH_KNN, export_mesh=EXPORT_MESH)
+        solve_clustering(fname, uid, view_id, save_dir=root, out_render_fol= OUTPUT_FOL, use_agglo=USE_AGGLO, max_num_clusters=MAX_NUM_CLUSTERS, is_pc=IS_PC, option=OPTION, with_knn=WITH_KNN, export_mesh=EXPORT_MESH, normal_threshold=NORMAL_THRESHOLD, refine_iters=REFINE_ITERS, ring_size=RING_SIZE)
