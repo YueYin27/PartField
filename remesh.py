@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import os
+import numpy as np
 import trimesh
 import pymeshlab
 
@@ -99,6 +100,15 @@ def remesh_ply_to_glb(
     ms.save_current_mesh(tmp_ply)
 
     mesh = trimesh.load(tmp_ply, force="mesh", process=False)
+
+    # glTF/GLB is Y-up by spec; most PLY files are Z-up. Rotate Z-up -> Y-up
+    # so the GLB displays in a glTF viewer the same way the PLY displays in
+    # a Z-up viewer. This is -90deg about the X axis: (x, y, z) -> (x, z, -y).
+    zup_to_yup = trimesh.transformations.rotation_matrix(
+        angle=-np.pi / 2, direction=[1, 0, 0], point=[0, 0, 0]
+    )
+    mesh.apply_transform(zup_to_yup)
+
     mesh.export(output_path)
     print(f"Exported GLB: {output_path}")
 
