@@ -169,14 +169,17 @@ class Demo_Dataset(torch.utils.data.Dataset):
                 print(mesh.vertices.shape)
                 print(mesh.faces.shape)
 
-            ### Save input
+            ### Save input (in ORIGINAL coordinates, not the normalized frame)
             save_dir = f"exp_results/{self.result_name}"
             os.makedirs(save_dir, exist_ok=True)
-            view_id = 0            
-            mesh.export(f'{save_dir}/input_{uid}_{view_id}.ply')                
+            view_id = 0
+            orig_vertices = mesh.vertices / scale + center
+            orig_mesh = trimesh.Trimesh(vertices=orig_vertices,
+                                        faces=mesh.faces,
+                                        process=False)
+            orig_mesh.export(f'{save_dir}/input_{uid}_{view_id}.ply')
 
-
-            pc, _ = trimesh.sample.sample_surface(mesh, self.pc_num_pts) 
+            pc, _ = trimesh.sample.sample_surface(mesh, self.pc_num_pts)
 
         result = {
                     'uid': uid
@@ -187,6 +190,10 @@ class Demo_Dataset(torch.utils.data.Dataset):
         if not self.is_pc:
             result['vertices'] = mesh.vertices
             result['faces'] = mesh.faces
+            # Save the normalization params so the model can de-normalize
+            # exported outputs (feat_pca_*.ply) to the original frame.
+            result['norm_center'] = torch.tensor(center, dtype=torch.float32)
+            result['norm_scale'] = torch.tensor(float(scale), dtype=torch.float32)
 
         return result
 

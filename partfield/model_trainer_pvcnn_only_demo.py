@@ -217,6 +217,12 @@ class Model(pl.LightningModule):
                 colors_255 = (data_reduced * 255).astype(np.uint8)
                 V = batch['vertices'][0].cpu().numpy()
                 F = batch['faces'][0].cpu().numpy()
+                # De-normalize vertices back to the original PLY frame so the
+                # exported feat_pca_*.ply matches the input's size/position.
+                if 'norm_center' in batch and 'norm_scale' in batch:
+                    nc = batch['norm_center'][0].cpu().numpy()
+                    ns = float(batch['norm_scale'][0].cpu().numpy())
+                    V = V / ns + nc
                 if self.cfg.vertex_feature:
                     colored_mesh = trimesh.Trimesh(vertices=V, faces=F, vertex_colors=colors_255, process=False)
                 else:
