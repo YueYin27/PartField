@@ -1,5 +1,5 @@
 # 1. Remesh the ply files and convert to glb format
-for ply in data/processed_object_meshes/*.ply; do
+for ply in processed_object_meshes/*ply; do
   ply_name=$(basename $ply)
   obj_name=${ply_name%.*}
   python remesh.py --input $ply --output data/${obj_name}/${obj_name}.glb
@@ -25,7 +25,7 @@ for glb_path in data/*; do
     --dump_dir exp_results/clustering/${obj_name} \
     --source_dir ${glb_path} \
     --use_agglo True \
-    --max_num_clusters 20 \
+    --max_num_clusters 10 \
     --option 1 \
     --with_knn True \
     --normal_threshold 0.1 \
@@ -33,11 +33,33 @@ for glb_path in data/*; do
     --ring_size 10
 done
 
-# 4. Split the parts and save as ply files
+# 4. Copy the clustering results (ply files) to clustering_final based on the number of parts
+mkdir -p exp_results/clustering_final
 while read obj_name k; do
   printf -v k_pad "%02d" "$k"
-  python split_parts.py \
-    --mesh exp_results/partfield_features/${obj_name}/input_${obj_name}_0.ply \
-    --labels exp_results/clustering/${obj_name}/cluster_out/${obj_name}_0_${k_pad}.npy \
-    --out_dir exp_results/parts/${obj_name}
+  cp exp_results/clustering/${obj_name}/ply/${obj_name}_0_${k_pad}.ply exp_results/clustering_final/${obj_name}_${k_pad}.ply
 done < exp_results/num_part.txt
+
+# 5. Convert to usdz format with separated parts
+python mesh_to_usdz.py --input_dir exp_results/clustering_final/ --output_dir exp_results/usdz/
+
+# 6. Downsample
+for obj in exp_results/data_with_parts/*; do
+  obj_name=$(basename $obj)
+  python downsample_mesh.py \
+  --input $obj \
+  --output data_downsampled/${obj_name} \
+  --total_vertices 500
+done
+
+
+conda activate text2hoi
+
+# 1. Find contact parts
+python find_contact_parts.py --contact --output out.json --format json
+
+# 2. Extend prompts with contact parts
+python extend_prompts_with_parts.py \
+  --text_json data/grab/text.json \
+  --contacts_json out.json \
+  --output data/grab/text_with_parts.json
