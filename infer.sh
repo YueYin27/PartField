@@ -6,7 +6,7 @@ for ply in processed_object_meshes/*ply; do
 done
 
 # 2. Run partfield inference
-for glb_path in data/*; do
+for glb_path in arctic/data/*; do
   obj_name=$(basename $glb_path)
   python partfield_inference.py \
     -c configs/final/demo.yaml \
@@ -17,7 +17,7 @@ for glb_path in data/*; do
 done
 
 # 3. Run clustering
-for glb_path in data/*; do
+for glb_path in arctic/data/*; do
 # for glb_path in $(ls -rd data/*); do
   obj_name=$(basename $glb_path)
   python run_part_clustering.py \
@@ -44,12 +44,20 @@ done < exp_results/num_part.txt
 python mesh_to_usdz.py --input_dir exp_results/clustering_final/ --output_dir exp_results/usdz/
 
 # 6. Downsample
-for obj in exp_results/data_with_parts/*; do
+for obj in arctic/data_with_parts/*; do
   obj_name=$(basename $obj)
   python downsample_mesh.py \
   --input $obj \
-  --output data_downsampled/${obj_name} \
-  --total_vertices 500
+  --output arctic/data_256/${obj_name} \
+  --total_vertices 256
+done
+
+for obj in arctic/data_with_parts/*; do
+  obj_name=$(basename $obj)
+  python downsample_mesh.py \
+  --input $obj \
+  --output arctic/data_128/${obj_name} \
+  --total_vertices 128
 done
 
 
@@ -58,8 +66,26 @@ conda activate text2hoi
 # 1. Find contact parts
 python find_contact_parts.py --contact --output out.json --format json
 
+python find_contact_parts.py --dataset arctic --contact \
+  --data_path data/arctic/data.npz \
+  --obj_pkl   data/arctic/obj.pkl \
+  --glb_dir   data/arctic/data_with_parts \
+  --output    out_arctic.json --format json
+
+
 # 2. Extend prompts with contact parts
 python extend_prompts_with_parts.py \
   --text_json data/grab/text.json \
   --contacts_json out.json \
   --output data/grab/text_with_parts.json
+
+python extend_prompts_with_parts.py \
+  --data_npz data/arctic/data.npz \
+  --text_json data/arctic/text.json \
+  --contacts_json out_arctic.json \
+  --output data/arctic/text_with_parts.json
+
+python extend_prompts_with_parts.py --dataset arctic \
+  --data_npz data/arctic/data.npz \
+  --text_json data/arctic/text.json \
+  --contacts_json out_arctic.json
